@@ -1,0 +1,97 @@
+name: 🔄 Mise à jour Dashboard Yield
+
+# ── DÉCLENCHEURS ──────────────────────────────────────────────────────────────
+on:
+  # Déclenchement manuel depuis l'interface GitHub
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Raison de la mise à jour"
+        required: false
+        default: "Mise à jour manuelle"
+
+  # Déclenchement via webhook externe (Power Automate → GitHub)
+  # Power Automate appelle : POST /repos/{owner}/{repo}/dispatches
+  # avec body : {"event_type": "sharepoint-update"}
+  repository_dispatch:
+    types: [sharepoint-update]
+
+  # Optionnel : déclenchement quotidien à 7h00 (Paris)
+  # schedule:
+  #   - cron: "0 6 * * 1-5"   # Lun-Ven à 6h UTC = 7h Paris
+
+# ── PERMISSIONS ───────────────────────────────────────────────────────────────
+permissions:
+  contents: write   # Pour committer index.html
+  pages: write      # Pour déployer sur GitHub Pages
+  id-token: write
+
+# ── JOBS ──────────────────────────────────────────────────────────────────────
+jobs:
+  build-and-deploy:
+    name: Génération & Déploiement
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout du repo
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # 2. Python
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # 3. Dépendances Python
+      - name: 📦 Installer dépendances
+        run: pip install openpyxl requests msal
+
+      # 4. Télécharger les xlsx depuis SharePoint
+      - name: 📂 Télécharger fichiers depuis SharePoint
+        env:
+          SHAREPOINT_TENANT_ID:    ${{ secrets.SHAREPOINT_TENANT_ID }}
+          SHAREPOINT_CLIENT_ID:    ${{ secrets.SHAREPOINT_CLIENT_ID }}
+          SHAREPOINT_CLIENT_SECRET:${{ secrets.SHAREPOINT_CLIENT_SECRET }}
+          SHAREPOINT_SITE_URL:     ${{ secrets.SHAREPOINT_SITE_URL }}
+          SHAREPOINT_FOLDER_PATH:  ${{ secrets.SHAREPOINT_FOLDER_PATH }}
+        run: python download_sharepoint.py
+
+      # 5. Génération du dashboard
+      - name: ⚙️ Générer dashboard
+        run: |
+          python generate.py \
+            --input    ./data \
+            --template ./RMS_MSC.html \
+            --output   ./index.html
+
+      # 6. Commit & push du fichier généré
+      - name: 💾 Commit index.html
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git diff --staged --quiet || git commit -m "🔄 Dashboard mis à jour — $(date +'%d/%m/%Y %H:%M')"
+          git push
+
+      # 7. Déploiement GitHub Pages
+      - name: 🚀 Déployer sur GitHub Pages
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages
+
+      # 8. Notification de succès (optionnel — Teams webhook)
+      # - name: 📣 Notification Teams
+      #   if: success()
+      #   run: |
+      #     curl -X POST "${{ secrets.TEAMS_WEBHOOK_URL }}" \
+      #       -H "Content-Type: application/json" \
+      #       -d '{"text":"✅ Dashboard Yield mis à jour — https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"}'
+
+      # En cas d'échec
+      - name: ❌ En cas d'échec
+        if: failure()
+        run: |
+          echo "La génération a échoué. Vérifiez les fichiers xlsx dans SharePoint."
+          echo "Dossier attendu : ${{ secrets.SHAREPOINT_FOLDER_PATH }}"
